@@ -50,6 +50,18 @@ export class OrdersController {
     };
   }
 
+  @Post('cancel-scan')
+  cancelScan() {
+    const stopped = this.ordersService.requestCancelScan();
+    return {
+      success: true,
+      stopped,
+      message: stopped
+        ? 'Đã gửi yêu cầu dừng quét. Hệ thống sẽ dừng ngay sau khi xử lý xong bước hiện tại.'
+        : 'Hiện không có phiên quét nào đang chạy để dừng.',
+    };
+  }
+
   @Post('reset')
   async resetSession(
     @Query('threshold') threshold?: string,
@@ -125,6 +137,7 @@ export class OrdersController {
     return {
       stuckThresholdHours: parseFloat(this.settingsService.get('STUCK_THRESHOLD_HOURS', '24')) || 24,
       pageSize: parseInt(this.settingsService.get('PAGE_SIZE', '200'), 10) || 200,
+      maxScanPages: parseInt(this.settingsService.get('MAX_SCAN_PAGES', '300'), 10) || 300,
       customerIds: this.settingsService.get('CUSTOMER_IDS', '28961,18363'),
       customerLabelsJson: this.settingsService.get('CUSTOMER_LABELS_JSON', '{"28961":"Khách VIP 28961","18363":"Khách 18363"}'),
       statusId: this.settingsService.get('STATUS_ID', '4'),
@@ -153,6 +166,9 @@ export class OrdersController {
       }
       if (body.pageSize !== undefined) {
         await this.settingsService.set('PAGE_SIZE', String(body.pageSize));
+      }
+      if (body.maxScanPages !== undefined) {
+        await this.settingsService.set('MAX_SCAN_PAGES', String(body.maxScanPages));
       }
       if (body.customerIds !== undefined) {
         await this.settingsService.set('CUSTOMER_IDS', String(body.customerIds));

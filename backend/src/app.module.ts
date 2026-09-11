@@ -5,6 +5,7 @@ import { join } from 'path';
 
 import configuration from './config/configuration';
 import { SettingsModule } from './settings/settings.module';
+import { ShopsModule } from './shops/shops.module';
 import { AuthService } from './auth/auth.service';
 import { TrackingService } from './tracking/tracking.service';
 import { OrdersService } from './orders/orders.service';
@@ -21,6 +22,7 @@ import { CronService } from './cron/cron.service';
     }),
     ScheduleModule.forRoot(),
     SettingsModule,
+    ShopsModule,
   ],
   controllers: [OrdersController],
   providers: [

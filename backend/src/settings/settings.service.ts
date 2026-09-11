@@ -94,6 +94,7 @@ export class SettingsService implements OnModuleInit {
       { key: 'WAREHOUSE_TYPE', envVal: process.env.WAREHOUSE_TYPE, defaultVal: '2', isEncrypted: false },
       { key: 'DEFAULT_LOOKBACK_DAYS', envVal: process.env.DEFAULT_LOOKBACK_DAYS, defaultVal: '60', isEncrypted: false },
       { key: 'PAGE_SIZE', envVal: process.env.PAGE_SIZE, defaultVal: '200', isEncrypted: false },
+      { key: 'MAX_SCAN_PAGES', envVal: process.env.MAX_SCAN_PAGES, defaultVal: '300', isEncrypted: false },
       { key: 'TELEGRAM_BOT_TOKEN', envVal: process.env.TELEGRAM_BOT_TOKEN, defaultVal: '', isEncrypted: true },
       { key: 'TELEGRAM_CHAT_ID', envVal: process.env.TELEGRAM_CHAT_ID, defaultVal: '', isEncrypted: false },
       { key: 'TELEGRAM_POLLING', envVal: process.env.TELEGRAM_POLLING, defaultVal: 'false', isEncrypted: false },

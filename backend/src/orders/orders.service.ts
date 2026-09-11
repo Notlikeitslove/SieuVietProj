@@ -30,11 +30,18 @@ export interface AnalysisResult {
   timestamp: string;
   partnerSummary: Record<string, { count: number; maxHoursStuck: number; orders: StuckOrder[] }>;
   stuckOrders: StuckOrder[];
+  cancelled?: boolean;
+  truncated?: boolean;
 }
 
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
+  private scanAbortController: AbortController | null = null;
+  private cancelRequested = false;
+  private lastScanCancelled = false;
+  private lastScanTruncated = false;
+  private isBusy = false;
 
   constructor(
     private readonly configService: ConfigService,
@@ -43,10 +50,25 @@ export class OrdersService {
     private readonly trackingService: TrackingService,
   ) {}
 
+  requestCancelScan(): boolean {
+    if (!this.isBusy) return false;
+    this.cancelRequested = true;
+    this.scanAbortController?.abort();
+    this.logger.warn('🛑 Đã nhận yêu cầu DỪNG quét đơn hàng từ người dùng.');
+    return true;
+  }
+
+  isScanning(): boolean {
+    return this.isBusy;
+  }
+
   async fetchOrdersFromApi(options: any = {}): Promise<any[]> {
+    this.scanAbortController = new AbortController();
+
     let token = await this.authService.getToken();
 
     if (!token) {
+      this.scanAbortController = null;
       throw new Error('Chưa có Token Authorization. Vui lòng dán SV_AUTH_TOKEN hoặc điền SV_USERNAME & SV_PASSWORD vào cài đặt');
     }
 
@@ -71,6 +93,7 @@ export class OrdersService {
     let page = 1;
     const defaultPageSize = parseInt(this.settingsService.get('PAGE_SIZE', '200'), 10) || 200;
     const pageSize = options.pageSize ? parseInt(options.pageSize, 10) : defaultPageSize;
+    const maxPages = parseInt(this.settingsService.get('MAX_SCAN_PAGES', '300'), 10) || 300;
     let hasMore = true;
 
     this.logger.log(`--------------------------------------------------------------------------------`);
@@ -78,6 +101,7 @@ export class OrdersService {
     this.logger.log(`   🗓️  Khoảng thời gian lọc : Từ ${dateFrom} -> Đến ${dateTo} (${lookbackDays} ngày)`);
     this.logger.log(`   📋 Tham số kiểm soát gửi đi (Query Params):`);
     this.logger.log(`      ├─ Số đơn trên trang (pageSize)     : ${pageSize}`);
+    this.logger.log(`      ├─ Giới hạn an toàn (maxPages)     : ${maxPages} trang (~${maxPages * pageSize} đơn)`);
     this.logger.log(`      ├─ Loại ngày lọc (typeFilterDate)  : ${typeFilterDate}`);
     this.logger.log(`      ├─ Đơn quản lý (is_manage_order)   : true`);
     this.logger.log(`      ├─ Loại kho (ware_house_type)     : ${warehouseType}`);
@@ -87,6 +111,19 @@ export class OrdersService {
     this.logger.log(`--------------------------------------------------------------------------------`);
 
     while (hasMore) {
+      if (this.cancelRequested) {
+        this.logger.warn(`🛑 Dừng quét theo yêu cầu người dùng trước trang ${page}. Đã tải được ${allOrders.length} đơn.`);
+        this.lastScanCancelled = true;
+        break;
+      }
+
+      if (page > maxPages) {
+        this.logger.warn(`⚠️ Đã đạt giới hạn an toàn ${maxPages} trang (${allOrders.length} đơn). Dừng tải để tránh quét vô hạn.`);
+        this.logger.warn(`   💡 Muốn quét đầy đủ hơn: thu hẹp "Thời gian quét" / ID Khách Hàng, hoặc tăng "Giới hạn số trang tối đa" trong Cài Đặt.`);
+        this.lastScanTruncated = true;
+        break;
+      }
+
       const queryParams = new URLSearchParams();
       queryParams.append('pageSize', pageSize.toString());
       queryParams.append('page', page.toString());
@@ -111,7 +148,8 @@ export class OrdersService {
       try {
         const response = await axios.get(apiUrl, {
           headers: { Authorization: token, Accept: 'application/json' },
-          timeout: 20000
+          timeout: 20000,
+          signal: this.scanAbortController?.signal
         });
 
         const data = response.data;
@@ -120,7 +158,7 @@ export class OrdersService {
         if (items.length > 0) {
           allOrders = allOrders.concat(items);
           this.logger.log(`   📄 [Trang ${page}]: Tải về thành công ${items.length} đơn hàng.`);
-          
+
           if (items.length < pageSize) {
             this.logger.log(`   🏁 Trang ${page} lấy ${items.length} đơn (< ${pageSize}) -> Đã lấy hết toàn bộ đơn hàng.`);
             hasMore = false;
@@ -132,6 +170,13 @@ export class OrdersService {
           hasMore = false;
         }
       } catch (err) {
+        if (axios.isCancel(err) || this.cancelRequested) {
+          this.logger.warn(`🛑 Đã dừng quét theo yêu cầu người dùng tại trang ${page}. Tổng đã tải: ${allOrders.length} đơn.`);
+          this.lastScanCancelled = true;
+          hasMore = false;
+          break;
+        }
+
         if (err.response?.status === 401) {
           this.logger.warn('⚠️ Nhận được lỗi 401 Unauthorized từ API. Đang tự động đăng nhập lại...');
           token = await this.authService.getToken(true);
@@ -139,7 +184,8 @@ export class OrdersService {
             try {
               const retryRes = await axios.get(apiUrl, {
                 headers: { Authorization: token, Accept: 'application/json' },
-                timeout: 20000
+                timeout: 20000,
+                signal: this.scanAbortController?.signal
               });
               const data = retryRes.data;
               const items = Array.isArray(data) ? data : (data?.data || data?.rows || []);
@@ -150,19 +196,48 @@ export class OrdersService {
                 continue;
               }
             } catch (retryErr) {
+              if (axios.isCancel(retryErr) || this.cancelRequested) {
+                this.logger.warn(`🛑 Đã dừng quét theo yêu cầu người dùng. Tổng đã tải: ${allOrders.length} đơn.`);
+                this.lastScanCancelled = true;
+                hasMore = false;
+                break;
+              }
+              this.scanAbortController = null;
               throw new Error(`❌ Đã đăng nhập lại nhưng vẫn thất bại khi kết nối API: ${retryErr.message}`);
             }
           }
         }
+        this.scanAbortController = null;
         throw new Error(`❌ Lỗi kết nối API SV Express: ${err.message}`);
       }
     }
 
-    this.logger.log(`✅ [GHSV API HOÀN TẤT] Tổng cộng đã tải về ${allOrders.length} đơn hàng qua ${page} trang.`);
+    this.scanAbortController = null;
+    if (this.lastScanCancelled) {
+      this.logger.warn(`🛑 [GHSV API DỪNG SỚM] Đã dừng theo yêu cầu. Tổng cộng đã tải được ${allOrders.length} đơn hàng qua ${page} trang trước khi dừng.`);
+    } else if (this.lastScanTruncated) {
+      this.logger.warn(`⚠️ [GHSV API BỊ CẮT BỚT] Đã đạt giới hạn an toàn. Tổng cộng đã tải được ${allOrders.length} đơn hàng qua ${page - 1} trang (có thể chưa đầy đủ).`);
+    } else {
+      this.logger.log(`✅ [GHSV API HOÀN TẤT] Tổng cộng đã tải về ${allOrders.length} đơn hàng qua ${page} trang.`);
+    }
     return allOrders;
   }
 
   async analyzeStuckOrders(options: any = {}): Promise<AnalysisResult> {
+    this.isBusy = true;
+    this.cancelRequested = false;
+    this.lastScanCancelled = false;
+    this.lastScanTruncated = false;
+
+    try {
+      return await this.runAnalysis(options);
+    } finally {
+      this.isBusy = false;
+      this.scanAbortController = null;
+    }
+  }
+
+  private async runAnalysis(options: any = {}): Promise<AnalysisResult> {
     const defaultThreshold = parseFloat(this.settingsService.get('STUCK_THRESHOLD_HOURS', '24')) || 24;
     const thresholdHours = options.thresholdHours || defaultThreshold;
     const enablePublicTracking = options.enablePublicTracking ?? true;
@@ -181,6 +256,11 @@ export class OrdersService {
     let failedCount = 0;
 
     for (const item of rawOrders) {
+      if (this.cancelRequested) {
+        this.lastScanCancelled = true;
+        this.logger.warn(`🛑 Dừng phân tích đơn theo yêu cầu người dùng. Đã xử lý ${passedCount + failedCount}/${rawOrders.length} đơn tải về.`);
+        break;
+      }
       const svCode = item.code || item.order_code || 'N/A';
       const partnerCode = item.partner_order_code || item.tracking_code || 'N/A';
       const rawPartner = item.partner?.partner_name || item.partner_name || item.partner?.name || 'Chưa xác định';
@@ -279,7 +359,9 @@ export class OrdersService {
       thresholdHours,
       timestamp: new Date().toISOString(),
       partnerSummary,
-      stuckOrders
+      stuckOrders,
+      cancelled: this.lastScanCancelled,
+      truncated: this.lastScanTruncated
     };
   }
 
