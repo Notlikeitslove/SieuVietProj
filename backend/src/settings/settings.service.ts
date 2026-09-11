@@ -96,6 +96,7 @@ export class SettingsService implements OnModuleInit {
       { key: 'PAGE_SIZE', envVal: process.env.PAGE_SIZE, defaultVal: '200', isEncrypted: false },
       { key: 'MAX_SCAN_PAGES', envVal: process.env.MAX_SCAN_PAGES, defaultVal: '300', isEncrypted: false },
       { key: 'PUBLIC_TRACKING_MIN_HOURS', envVal: process.env.PUBLIC_TRACKING_MIN_HOURS, defaultVal: '18', isEncrypted: false },
+      { key: 'TRACKING_CONCURRENCY', envVal: process.env.TRACKING_CONCURRENCY, defaultVal: '8', isEncrypted: false },
       { key: 'TELEGRAM_BOT_TOKEN', envVal: process.env.TELEGRAM_BOT_TOKEN, defaultVal: '', isEncrypted: true },
       { key: 'TELEGRAM_CHAT_ID', envVal: process.env.TELEGRAM_CHAT_ID, defaultVal: '', isEncrypted: false },
       { key: 'TELEGRAM_POLLING', envVal: process.env.TELEGRAM_POLLING, defaultVal: 'false', isEncrypted: false },

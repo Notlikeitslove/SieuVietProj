@@ -42,6 +42,7 @@ export class OrdersService {
   private lastScanCancelled = false;
   private lastScanTruncated = false;
   private isBusy = false;
+  private currentScanPromise: Promise<AnalysisResult> | null = null;
 
   constructor(
     private readonly configService: ConfigService,
@@ -224,17 +225,50 @@ export class OrdersService {
   }
 
   async analyzeStuckOrders(options: any = {}): Promise<AnalysisResult> {
+    // Scan state (scanAbortController, cancelRequested, ...) is shared instance state,
+    // not per-call - two overlapping scans (e.g. React StrictMode's dev double-effect,
+    // or a user re-triggering a scan before the last one finished) would otherwise race
+    // and corrupt each other's cancel/abort tracking. Policy: only ONE scan runs at a
+    // time - a new request pre-empts (cancels) whatever is currently running so the
+    // freshest request always wins, instead of piling up parallel scans.
+    if (this.isBusy && this.currentScanPromise) {
+      this.logger.warn('🔄 Có yêu cầu quét mới trong khi phiên trước chưa xong -> hủy phiên cũ, ưu tiên xử lý phiên mới nhất.');
+      this.cancelRequested = true;
+      this.scanAbortController?.abort();
+      try {
+        await this.currentScanPromise;
+      } catch {
+        // The pre-empted scan may settle in an unexpected way - irrelevant, we're superseding it.
+      }
+    }
+
     this.isBusy = true;
     this.cancelRequested = false;
     this.lastScanCancelled = false;
     this.lastScanTruncated = false;
 
-    try {
-      return await this.runAnalysis(options);
-    } finally {
+    const scanPromise = this.runAnalysis(options).finally(() => {
       this.isBusy = false;
       this.scanAbortController = null;
-    }
+      if (this.currentScanPromise === scanPromise) {
+        this.currentScanPromise = null;
+      }
+    });
+    this.currentScanPromise = scanPromise;
+    return scanPromise;
+  }
+
+  private async runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(limit, items.length));
+    const runners = new Array(workerCount).fill(0).map(async () => {
+      while (cursor < items.length) {
+        if (this.cancelRequested) return;
+        const item = items[cursor++];
+        await worker(item);
+      }
+    });
+    await Promise.all(runners);
   }
 
   private async runAnalysis(options: any = {}): Promise<AnalysisResult> {
@@ -313,20 +347,6 @@ export class OrdersService {
           publicTracking: null
         };
 
-        if (enablePublicTracking && partnerCode !== 'N/A' && hoursStuck >= trackingMinHours) {
-          orderData.publicTracking = await this.trackingService.fetchPublicTrackingInfo(partnerName, partnerCode);
-          if (orderData.publicTracking) {
-            if (orderData.publicTracking.statusTimestamp) {
-              const pubHours = Math.max(0, (now.getTime() - orderData.publicTracking.statusTimestamp) / (3600 * 1000));
-              orderData.publicTracking.hoursSinceLastUpdate = parseFloat(pubHours.toFixed(1));
-              orderData.publicTracking.isOutdated = pubHours >= 24;
-            } else {
-              orderData.publicTracking.hoursSinceLastUpdate = orderData.hoursStuck;
-              orderData.publicTracking.isOutdated = orderData.hoursStuck >= 24;
-            }
-          }
-        }
-
         stuckOrders.push(orderData);
 
         if (!partnerSummary[partnerName]) {
@@ -337,6 +357,41 @@ export class OrdersService {
         partnerSummary[partnerName].orders.push(orderData);
       } else {
         failedCount++;
+      }
+    }
+
+    // Public tracking = 1 external HTTP call per order (J&T/SPX). Running these
+    // sequentially with thousands of stuck orders can take 5-10+ minutes and blow
+    // past any reverse-proxy/browser timeout, making the dashboard look like it
+    // "never loads". Run them concurrently (bounded) instead.
+    if (enablePublicTracking) {
+      const candidates = stuckOrders.filter(o => o.partnerCode !== 'N/A' && o.hoursStuck >= trackingMinHours);
+      const concurrency = parseInt(this.settingsService.get('TRACKING_CONCURRENCY', '8'), 10) || 8;
+      if (candidates.length > 0) {
+        this.logger.log(`🌐 Đang tra cứu hành trình công khai cho ${candidates.length} đơn (song song ${concurrency} luồng)...`);
+        const trackingStart = Date.now();
+
+        await this.runWithConcurrency(candidates, concurrency, async (orderData) => {
+          orderData.publicTracking = await this.trackingService.fetchPublicTrackingInfo(orderData.partnerName, orderData.partnerCode);
+          if (orderData.publicTracking) {
+            if (orderData.publicTracking.statusTimestamp) {
+              const pubHours = Math.max(0, (now.getTime() - orderData.publicTracking.statusTimestamp) / (3600 * 1000));
+              orderData.publicTracking.hoursSinceLastUpdate = parseFloat(pubHours.toFixed(1));
+              orderData.publicTracking.isOutdated = pubHours >= 24;
+            } else {
+              orderData.publicTracking.hoursSinceLastUpdate = orderData.hoursStuck;
+              orderData.publicTracking.isOutdated = orderData.hoursStuck >= 24;
+            }
+          }
+        });
+
+        const trackingSecs = ((Date.now() - trackingStart) / 1000).toFixed(1);
+        if (this.cancelRequested) {
+          this.lastScanCancelled = true;
+          this.logger.warn(`🛑 Dừng tra cứu hành trình theo yêu cầu người dùng sau ${trackingSecs}s.`);
+        } else {
+          this.logger.log(`✅ Hoàn tất tra cứu hành trình ${candidates.length} đơn trong ${trackingSecs}s.`);
+        }
       }
     }
 

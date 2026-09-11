@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   fetchOrderAnalysis,
   resetSessionApi,
@@ -488,7 +488,13 @@ export const App: React.FC = () => {
     }
   };
 
+  // React.StrictMode intentionally double-invokes effects in dev to surface missing
+  // cleanup - without this guard, the initial scan would fire twice on every page
+  // load and race with itself. A ref survives that double-invoke (unlike state).
+  const hasLoadedRef = useRef(false);
   useEffect(() => {
+    if (hasLoadedRef.current) return;
+    hasLoadedRef.current = true;
     loadData();
     loadSettings();
     loadShopGroups();
