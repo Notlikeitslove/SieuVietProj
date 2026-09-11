@@ -97,6 +97,7 @@ export const App: React.FC = () => {
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<number>>(new Set());
   const [shopSearchQuery, setShopSearchQuery] = useState<string>('');
   const [applyingDashboardFilter, setApplyingDashboardFilter] = useState<boolean>(false);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<number>>(new Set());
 
   const showToastMsg = (msg: string) => {
     setToast(msg);
@@ -432,19 +433,56 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSelectGroupFilter = async (groupId: number) => {
+  // Multi-select: tap a group chip to toggle it in/out of the pending selection,
+  // then hit "Áp Dụng Đã Chọn" to combine every selected group's shops into one filter.
+  const toggleGroupSelection = (groupId: number) => {
+    setSelectedGroupIds(prev => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllGroups = () => {
+    setSelectedGroupIds(prev => {
+      const allSelected = shopGroupList.length > 0 && shopGroupList.every(g => prev.has(g.id));
+      return allSelected ? new Set() : new Set(shopGroupList.map(g => g.id));
+    });
+  };
+
+  const clearGroupSelection = () => setSelectedGroupIds(new Set());
+
+  const handleApplySelectedGroups = async () => {
+    if (selectedGroupIds.size === 0) {
+      showToastMsg('⚠️ Vui lòng chọn ít nhất 1 nhóm trước khi áp dụng');
+      return;
+    }
+    const selectedGroups = shopGroupList.filter(g => selectedGroupIds.has(g.id));
+    const shopMap = new Map<string, Shop>();
+    selectedGroups.forEach(g => g.shops.forEach(s => shopMap.set(s.svCustomerId, s)));
+    const shops = Array.from(shopMap.values());
+
+    if (shops.length === 0) {
+      showToastMsg('⚠️ Các nhóm đã chọn chưa có shop nào');
+      return;
+    }
+
     setApplyingDashboardFilter(true);
     try {
-      const res = await applyShopGroup(groupId);
+      const customerIds = shops.map(s => s.svCustomerId).join(',');
+      const labelsMap: Record<string, string> = {};
+      shops.forEach(s => { labelsMap[s.svCustomerId] = s.name || s.svCustomerId; });
+      const res = await saveSystemConfig({ customerIds, customerLabelsJson: JSON.stringify(labelsMap) });
       if (res.success) {
-        showToastMsg(`✅ ${res.message}`);
+        const groupNames = selectedGroups.map(g => g.name).join(', ');
+        showToastMsg(`✅ Đã áp dụng ${selectedGroups.length} nhóm (${shops.length} shop): ${groupNames}`);
         await loadSettings();
         loadData(true);
       } else {
         showToastMsg(`❌ ${res.message}`);
       }
     } catch (err: any) {
-      showToastMsg(`❌ Lỗi áp dụng nhóm: ${err.message}`);
+      showToastMsg(`❌ Lỗi áp dụng: ${err.message}`);
     } finally {
       setApplyingDashboardFilter(false);
     }
@@ -692,6 +730,11 @@ export const App: React.FC = () => {
   const isAllShopsActive = totalShopCount > 0 && currentCustomerIdSet.size === totalShopCount &&
     [...shopGroupList.flatMap(g => g.shops), ...ungroupedShops].every(s => currentCustomerIdSet.has(s.svCustomerId));
 
+  const selectedGroupShopCount = new Set(
+    shopGroupList.filter(g => selectedGroupIds.has(g.id)).flatMap(g => g.shops.map(s => s.svCustomerId))
+  ).size;
+  const allGroupsSelected = shopGroupList.length > 0 && shopGroupList.every(g => selectedGroupIds.has(g.id));
+
   const filteredOrders = thresholdFilteredOrders.filter(o => {
     if (activeCarrier !== 'ALL' && o.partnerName !== activeCarrier) return false;
     if (searchQuery.trim()) {
@@ -842,33 +885,74 @@ export const App: React.FC = () => {
 
           {/* Filter Controls - Button Groups */}
           <section className="control-panel">
-            <div className="control-row">
-              <span className="control-label">🏪 Rà soát theo nhóm:</span>
-              <div className="btn-group" style={{ opacity: applyingDashboardFilter ? 0.6 : 1, pointerEvents: applyingDashboardFilter ? 'none' : 'auto' }}>
-                {shopGroupList.map(g => (
-                  <button
-                    key={g.id}
-                    className={`btn-chip ${activeGroup?.id === g.id ? 'active' : ''}`}
-                    onClick={() => handleSelectGroupFilter(g.id)}
-                    disabled={applyingDashboardFilter}
-                  >
-                    {g.name} ({g.shops.length})
-                  </button>
-                ))}
-                {totalShopCount > 0 && (
-                  <button
-                    className={`btn-chip ${isAllShopsActive ? 'active' : ''}`}
-                    onClick={handleApplyAllShops}
-                    disabled={applyingDashboardFilter}
-                  >
-                    🌐 Tất cả Shop ({totalShopCount})
-                  </button>
+            <div className="control-row" style={{ alignItems: 'flex-start' }}>
+              <span className="control-label">🏪 Rà soát theo nhóm <em>(chọn 1 hoặc nhiều nhóm)</em>:</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minWidth: '260px' }}>
+                <div className="btn-group" style={{ opacity: applyingDashboardFilter ? 0.6 : 1, pointerEvents: applyingDashboardFilter ? 'none' : 'auto' }}>
+                  {shopGroupList.map(g => (
+                    <button
+                      key={g.id}
+                      className={`btn-chip ${selectedGroupIds.has(g.id) ? 'active' : ''}`}
+                      onClick={() => toggleGroupSelection(g.id)}
+                      disabled={applyingDashboardFilter}
+                      title={selectedGroupIds.has(g.id) ? 'Bấm để bỏ chọn nhóm này' : 'Bấm để chọn nhóm này'}
+                    >
+                      {selectedGroupIds.has(g.id) ? '✓ ' : ''}{g.name} ({g.shops.length})
+                    </button>
+                  ))}
+                  {shopGroupList.length > 0 && (
+                    <button
+                      className={`btn-chip ${allGroupsSelected ? 'active' : ''}`}
+                      onClick={toggleSelectAllGroups}
+                      disabled={applyingDashboardFilter}
+                    >
+                      {allGroupsSelected ? '✓ ' : ''}☑️ Chọn Hết
+                    </button>
+                  )}
+                  {totalShopCount > 0 && (
+                    <button
+                      className={`btn-chip ${isAllShopsActive ? 'active' : ''}`}
+                      onClick={handleApplyAllShops}
+                      disabled={applyingDashboardFilter}
+                      title="Áp dụng ngay toàn bộ shop trong hệ thống (kể cả shop chưa phân nhóm), không cần bấm Áp Dụng"
+                    >
+                      🌐 Tất Cả Shop ({totalShopCount})
+                    </button>
+                  )}
+                </div>
+
+                {selectedGroupIds.size > 0 && (
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleApplySelectedGroups}
+                      disabled={applyingDashboardFilter}
+                      style={{ padding: '7px 16px', fontSize: '12px' }}
+                    >
+                      ✅ Áp Dụng {selectedGroupIds.size} Nhóm Đã Chọn ({selectedGroupShopCount} shop)
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={clearGroupSelection}
+                      disabled={applyingDashboardFilter}
+                      style={{ padding: '7px 12px', fontSize: '12px' }}
+                    >
+                      ✕ Bỏ Chọn
+                    </button>
+                  </div>
+                )}
+
+                {applyingDashboardFilter && <span className="control-hint">⏳ Đang áp dụng & quét lại...</span>}
+                {!applyingDashboardFilter && selectedGroupIds.size === 0 && !activeGroup && !isAllShopsActive && (
+                  <span className="control-hint">🎯 Đang dùng bộ lọc tùy chỉnh ({currentCustomerIdSet.size} shop)</span>
+                )}
+                {!applyingDashboardFilter && selectedGroupIds.size === 0 && activeGroup && (
+                  <span className="control-hint">✅ Đang rà soát: {activeGroup.name}</span>
+                )}
+                {!applyingDashboardFilter && selectedGroupIds.size === 0 && isAllShopsActive && (
+                  <span className="control-hint">🌐 Đang rà soát: Tất cả shop</span>
                 )}
               </div>
-              {applyingDashboardFilter && <span className="control-hint">⏳ Đang áp dụng & quét lại...</span>}
-              {!applyingDashboardFilter && !activeGroup && !isAllShopsActive && (
-                <span className="control-hint">🎯 Đang dùng bộ lọc tùy chỉnh ({currentCustomerIdSet.size} shop)</span>
-              )}
             </div>
 
             <div className="control-row">

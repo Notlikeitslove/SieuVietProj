@@ -241,8 +241,14 @@ export class OrdersService {
     const defaultThreshold = parseFloat(this.settingsService.get('STUCK_THRESHOLD_HOURS', '24')) || 24;
     const thresholdHours = options.thresholdHours || defaultThreshold;
     const enablePublicTracking = options.enablePublicTracking ?? true;
+    // Public tracking does a live external HTTP call per order (J&T/SPX). Frontend now
+    // always fetches at a low baseline threshold so it can filter higher thresholds
+    // client-side without re-scanning - but that would otherwise force tracking lookups
+    // for far more orders than before. Gate tracking to orders that are ACTUALLY worth
+    // the lookup cost, independent of the low fetch threshold.
+    const trackingMinHours = parseFloat(this.settingsService.get('PUBLIC_TRACKING_MIN_HOURS', '18')) || 18;
 
-    this.logger.log(`⚡ [BẮT ĐẦU ĐÁNH GIÁ ĐƠN HÀNG] Điều kiện lọc: Ngâm >= ${thresholdHours} giờ | Care Public Tracking: ${enablePublicTracking ? 'BẬT' : 'TẮT'}`);
+    this.logger.log(`⚡ [BẮT ĐẦU ĐÁNH GIÁ ĐƠN HÀNG] Điều kiện lọc: Ngâm >= ${thresholdHours} giờ | Care Public Tracking: ${enablePublicTracking ? `BẬT (>= ${trackingMinHours}h)` : 'TẮT'}`);
 
     const rawOrders = await this.fetchOrdersFromApi(options);
     const now = new Date();
@@ -307,7 +313,7 @@ export class OrdersService {
           publicTracking: null
         };
 
-        if (enablePublicTracking && partnerCode !== 'N/A') {
+        if (enablePublicTracking && partnerCode !== 'N/A' && hoursStuck >= trackingMinHours) {
           orderData.publicTracking = await this.trackingService.fetchPublicTrackingInfo(partnerName, partnerCode);
           if (orderData.publicTracking) {
             if (orderData.publicTracking.statusTimestamp) {

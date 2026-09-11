@@ -67,6 +67,21 @@ export class TelegramService implements OnModuleInit {
       this.bot = new TelegramBot(token, { polling });
       this.logger.log(`🤖 Telegram Bot đã khởi tạo thành công! (${polling ? 'Polling ON' : 'Polling OFF'})`);
 
+      // CRITICAL: node-telegram-bot-api emits a bare 'error' event for some fatal
+      // polling failures. An 'error' event with zero listeners is a special case in
+      // Node's EventEmitter - it throws synchronously and crashes the whole process.
+      // Without these handlers, a Telegram-side hiccup (e.g. two instances polling
+      // at once -> 409 Conflict) can take down the entire backend, not just the bot.
+      this.bot.on('polling_error', (err: any) => {
+        this.logger.error(`⚠️ [TELEGRAM POLLING ERROR] ${err?.code || ''} ${err?.message || err}`);
+      });
+      this.bot.on('webhook_error', (err: any) => {
+        this.logger.error(`⚠️ [TELEGRAM WEBHOOK ERROR] ${err?.message || err}`);
+      });
+      this.bot.on('error', (err: any) => {
+        this.logger.error(`❌ [TELEGRAM FATAL ERROR] ${err?.message || err}`);
+      });
+
       if (polling) {
         this.setupCommands();
         this.setupMenuHandlers();
